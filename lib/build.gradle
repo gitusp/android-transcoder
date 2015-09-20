@@ -41,5 +41,6 @@ publish {
 
 dependencies {
     compile 'org.jcodec:jcodec:0.1.9'
+    compile 'io.reactivex:rxjava:1.0.14'
     compile fileTree(dir: 'libs', include: ['*.jar'])
 }

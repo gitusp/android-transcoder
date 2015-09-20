@@ -32,6 +32,13 @@ import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
+import rx.Observable;
+import rx.Subscriber;
+import rx.functions.Action0;
+import rx.functions.Action1;
+import rx.functions.Func1;
+import rx.subjects.PublishSubject;
+
 public class MediaTranscoder {
     private static final String TAG = "MediaTranscoder";
     private static final int MAXIMUM_THREAD = 1; // TODO
@@ -194,6 +201,102 @@ public class MediaTranscoder {
                 });
             }
         });
+    }
+
+    public Observable<Double> transcodeVideo(final String inPath, final String outPath, final MediaFormatStrategy outFormatStrategy) {
+        // Create file descriptor.
+        return Observable.create(new Observable.OnSubscribe<DescriptorAndStream>() {
+            @Override
+            public void call(Subscriber<? super DescriptorAndStream> subscriber) {
+                FileInputStream fileInputStream = null;
+                try {
+                    fileInputStream = new FileInputStream(inPath);
+                    subscriber.onNext(new DescriptorAndStream(fileInputStream.getFD(), fileInputStream));
+                    subscriber.onCompleted();
+                } catch (IOException e) {
+                    if (fileInputStream != null) {
+                        try {
+                            fileInputStream.close();
+                        } catch (IOException eClose) {
+                            Log.e(TAG, "Can't close input stream: ", eClose);
+                        }
+                    }
+                    subscriber.onError(e);
+                }
+            }
+        })
+        // Request transcoding.
+        .flatMap(new Func1<DescriptorAndStream, Observable<Double>>() {
+            @Override
+            public Observable<Double> call(final DescriptorAndStream descriptorAndStream) {
+                return transcodeVideo(descriptorAndStream.fileDescriptor, outPath, outFormatStrategy)
+                        .doOnError(new Action1<Throwable>() {
+                            @Override
+                            public void call(Throwable throwable) {
+                                try {
+                                    descriptorAndStream.fileInputStream.close();
+                                } catch (IOException e) {
+                                    Log.e(TAG, "Can't close input stream: ", e);
+                                }
+                            }
+                        })
+                        .doOnCompleted(new Action0() {
+                            @Override
+                            public void call() {
+                                try {
+                                    descriptorAndStream.fileInputStream.close();
+                                } catch (IOException e) {
+                                    Log.e(TAG, "Can't close input stream: ", e);
+                                }
+                            }
+                        });
+            }
+        });
+    }
+
+    public Observable<Double> transcodeVideo(final FileDescriptor inFileDescriptor, final String outPath, final MediaFormatStrategy outFormatStrategy) {
+        final PublishSubject subject = PublishSubject.<Double>create();
+        mExecutor.execute(new Runnable() {
+            @Override
+            public void run() {
+                Exception caughtException = null;
+                try {
+                    MediaTranscoderEngine engine = new MediaTranscoderEngine();
+                    engine.setProgressCallback(new MediaTranscoderEngine.ProgressCallback() {
+                        @Override
+                        public void onProgress(final double progress) {
+                            subject.onNext(progress);
+                        }
+                    });
+                    engine.setDataSource(inFileDescriptor);
+                    engine.transcodeVideo(outPath, outFormatStrategy);
+                } catch (IOException e) {
+                    Log.w(TAG, "Transcode failed: input file (fd: " + inFileDescriptor.toString() + ") not found"
+                            + " or could not open output file ('" + outPath + "') .", e);
+                    caughtException = e;
+                } catch (RuntimeException e) {
+                    Log.e(TAG, "Fatal error while transcoding, this might be invalid format or bug in engine or Android.", e);
+                    caughtException = e;
+                }
+
+                if (caughtException == null) {
+                    subject.onCompleted();
+                } else {
+                    subject.onError(caughtException);
+                }
+            }
+        });
+        return subject;
+    }
+
+    private class DescriptorAndStream {
+        final FileDescriptor fileDescriptor;
+        final FileInputStream fileInputStream;
+
+        public DescriptorAndStream(FileDescriptor fileDescriptor, FileInputStream fileInputStream) {
+            this.fileDescriptor = fileDescriptor;
+            this.fileInputStream = fileInputStream;
+        }
     }
 
     public interface Listener {
